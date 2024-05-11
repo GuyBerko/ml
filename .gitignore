@@ -3,3 +3,5 @@ input/
 *.sh
 *.html
 __pycache__/
+.DS_Store
+versions/

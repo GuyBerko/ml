@@ -1,211 +1,166 @@
-from unittest import TestResult
 import matplotlib.pyplot as plt
 import torch
-import torchvision
 from torchvision import datasets, transforms, models
+from torch.utils.data.dataloader import DataLoader
+from torch.utils.data import random_split
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import sys
 from tqdm import tqdm
 
-classes = ("animal", "person")
-PATH = './resnet18.pth'
-batch_size = 32
+PATH = "./image-classifier-cnn.pth"
 
-class conv_block(nn.Module):
-		def __init__(self, in_c, out_c, kernel, padding=1):
-			super().__init__()
-			self.conv1 = nn.Conv2d(in_c, out_c, kernel, padding=padding)
-			self.conv1_1 = nn.Conv2d(out_c, out_c, kernel, padding=padding)
-			self.bn_conv1 = nn.BatchNorm2d(out_c)
-			self.bn_conv1_1 = nn.BatchNorm2d(out_c)
-			self.pool = nn.MaxPool2d(2, 2)
+# train and test data directory
+### Seg ###
 
-		def forward(self, x):
-			x = F.relu(self.bn_conv1(self.conv1(x)))
-			x = self.pool(F.relu(self.conv1_1(x)))
-			return x
+data_dir = "./input/seg/train"
+test_data_dir = "./input/seg/test"
+num_classes = 6
+"""
+### Blood Cells ###
+data_dir = "./input/blood-cell/train"
+test_data_dir = "./input/blood-cell/test"
+num_classes = 4
+"""
 
-class Net(nn.Module):
-	def __init__(self):
-		super().__init__()
-		self.conv1 = conv_block(3,16,3,1)
-		self.conv2 = conv_block(16,32,3,1)
-		self.conv3 = conv_block(32,64,3,1)
-		self.conv4 = conv_block(64,128,3,1)
-		
-		self.fc1 = nn.Linear(128 * 14 * 14, 128)
-		self.fc2 = nn.Linear(128, 84)
-		self.fc3 = nn.Linear(84, 2)
-		self.dropout = nn.Dropout(.3)
 
-	def forward(self, x):
-		x = self.conv1(x)
-		x = self.conv2(x)
-		x = self.conv3(x)
-		x = self.conv4(x)
+def accuracy(outputs, labels):
+	_, preds = torch.max(outputs, dim=1)
+	return torch.tensor(torch.sum(preds == labels).item() / len(preds))
 
-		x = torch.flatten(x, 1)  # flatten all dimensions except batch
-		x = F.relu(self.fc1(x))
-		x = F.relu(self.fc2(x))
-		x = self.dropout(self.fc3(x))
-		x = F.log_softmax(x, dim=1)
-		return x
 
-#net = Net()
-net = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-num_ftrs = net.fc.in_features
-net.fc = nn.Linear(num_ftrs, 2)
-def imshow(img):
-	img = img / 2 + 0.5  # unnormalize
-	npimg = img.numpy()
-	plt.imshow(np.transpose(npimg, (1, 2, 0)))
-	plt.show()
+def validation_step(net, data):
+	inputs = data[0]
+	labels = data[1]
+	outputs = net(inputs)  # Generate predictions
+	loss = F.cross_entropy(outputs, labels)  # Calculate loss
+	acc = accuracy(outputs, labels)  # Calculate accuracy
+	return {"val_loss": loss.detach(), "val_acc": acc}
 
-def check_accuarcy(testloader, epoch):
-	correct_pred = {classname: 0 for classname in classes}
-	total_pred = {classname: 0 for classname in classes}
+def validation_epoch_end(outputs):
+	batch_losses = [x["val_loss"] for x in outputs]
+	epoch_loss = torch.stack(batch_losses).mean()  # Combine losses
+	batch_accs = [x["val_acc"] for x in outputs]
+	epoch_acc = torch.stack(batch_accs).mean()  # Combine accuracies
+	return {"val_loss": epoch_loss.item(), "val_acc": epoch_acc.item()}
 
-	# again no gradients needed
-	with torch.no_grad():
-		for data in testloader:
-			images, labels = data
-			outputs = net(images)
-			_, predictions = torch.max(outputs, 1)
-			# collect the correct predictions for each class
-			for label, prediction in zip(labels, predictions):
-				if label == prediction:
-					correct_pred[classes[label]] += 1
-				total_pred[classes[label]] += 1
+@torch.no_grad()
+def evaluate(net, val_loader):
+	net.eval()
+	outputs = [validation_step(net, batch) for batch in val_loader]
+	return validation_epoch_end(outputs)
 
-	# print accuracy for each class
-	for classname, correct_count in correct_pred.items():
-		accuracy = 100 * float(correct_count) / total_pred[classname]
-		print(f'Accuracy for class: {classname:5s} is {accuracy:.1f} %')
+def fit(epochs, lr, net, train_loader, val_loader):
+	history = []
+	optimizer = optim.Adam(net.parameters(), lr=lr)
 
-def train():
-
-	train_transform = transforms.Compose(
-		[
-			transforms.Resize((250, 250)),
-			transforms.RandomHorizontalFlip(.1),
-			transforms.RandomSolarize(.1),
-			transforms.RandomEqualize(.1),
-			transforms.RandomCrop((224, 224)),
-			# transforms.RandomGrayscale(.1),
-			transforms.ToTensor(),
-			transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-	test_transform = transforms.Compose(
-		[transforms.Resize((224, 224)),
-		 transforms.ToTensor()])
-
-	trainset = datasets.ImageFolder("input/trainanimals/train",
-									transform=train_transform)
-
-	testset = datasets.ImageFolder("input/trainanimals/test",
-									 transform=test_transform)
-
-	trainloader = torch.utils.data.DataLoader(trainset,
-												batch_size=batch_size,
-												shuffle=True,
-												drop_last=True,
-												num_workers=1)
-
-	testloader = torch.utils.data.DataLoader(testset,
-												batch_size=batch_size,
-												shuffle=True,
-												drop_last=True,
-												num_workers=1)
-
-	optimizer = optim.Adam(net.parameters(), lr=0.001)
-
-	for epoch in range(10):  # loop over the dataset multiple times
-		running_loss = 0.0
-		correct_pred = 0.
-		total_pred = 0.
-		counter = 0
-		loop = tqdm(trainloader, unit="it")
+	for epoch in range(epochs):  # loop over the dataset multiple times
+		train_losses = []
+		train_acc = []
+		net.train()
+		loop = tqdm(train_loader, unit="it")
 		loop.set_description(f"Epoch {epoch}")
 		for i, data in enumerate(loop):
-			
-			# get the inputs; data is a list of [inputs, labels]
-			inputs, labels = data
-
-			# zero the parameter gradients
+			inputs = data[0]
+			labels = data[1]
+			outputs = net(inputs)  # Generate predictions
+			loss = F.nll_loss(outputs, labels)  # Calculate loss
+			loss.backward()
+			acc = accuracy(outputs, labels)
+			train_losses.append(loss)
+			train_acc.append(acc)
+			optimizer.step()
 			optimizer.zero_grad()
 
-			# forward + backward + optimize
-			outputs = net(inputs)
-			
-			#loss = criterion(outputs, labels)
-			loss = F.nll_loss(outputs, labels)
-			loss.backward()
-			optimizer.step()
-
-			_, predictions = torch.max(outputs, 1)
-			# collect the correct predictions for each class
-			for label, prediction in zip(labels, predictions):
-				if label == prediction:
-					correct_pred += 1
-				total_pred += 1
-
-			accuracy = (100 * correct_pred / total_pred)
-
-			# print statistics
-			running_loss += loss.item()
-			counter += labels.shape[0]
-			loop.set_postfix(loss=(running_loss / (i+1)), accuracy=accuracy)
-		check_accuarcy(testloader=testloader, epoch=epoch+1)
-		
+		result = evaluate(net, val_loader)
+		result["train_loss"] = torch.stack(train_losses).mean().item()
+		result["train_acc"] = torch.stack(train_acc).mean().item()
+		print(
+			"Epoch [{}], train_loss: {:.4f}, train_acc: {:.4f}, val_loss: {:.4f}, val_acc: {:.4f}".format(
+				epoch,
+				result["train_loss"],
+				result["train_acc"],
+				result["val_loss"],
+				result["val_acc"],
+			)
+		)
+		history.append(result)
 
 	print("Finished Training")
+	return history
 
-	torch.save(net.state_dict(), PATH)
 
-def test():
-	net = Net()
-	net.load_state_dict(torch.load(PATH))
+def plot_accuracies(history):
+	"""Plot the history of accuracies"""
+	plt.clf()
+	train_accuracies = [x["train_acc"] for x in history]
+	val_accuracies = [x["val_acc"] for x in history]
+	plt.plot(train_accuracies, "-bx")
+	plt.plot(val_accuracies, "-rx")
+	plt.xlabel("epoch")
+	plt.ylabel("accuracy")
+	plt.legend(["Training", "Validation"])
+	plt.title("Accuracy vs. No. of epochs")
+	plt.savefig("acc-graph-resnet18.png")
 
-	transform = transforms.Compose(
-		[transforms.Resize((224, 224)),
-		 transforms.ToTensor()])
 
-	testset = datasets.ImageFolder("input/trainanimals/train",
-									 transform=transform)
-
-	testloader = torch.utils.data.DataLoader(testset,
-												batch_size=batch_size,
-												shuffle=True,
-												drop_last=True,
-												num_workers=1)
-
-	# prepare to count predictions for each class
-	correct_pred = {classname: 0 for classname in classes}
-	total_pred = {classname: 0 for classname in classes}
-
-	# again no gradients needed
-	with torch.no_grad():
-		for data in testloader:
-			images, labels = data
-			outputs = net(images)
-			_, predictions = torch.max(outputs, 1)
-			# collect the correct predictions for each class
-			for label, prediction in zip(labels, predictions):
-				result = "Failed"
-				if label == prediction:
-					correct_pred[classes[label]] += 1
-					result = "Success"
-				total_pred[classes[label]] += 1
-				#print("prediction: {} actual: {} => {}".format(prediction, label, result))
-
-	for classname, correct_count in correct_pred.items():
-		accuracy = 100 * float(correct_count) / total_pred[classname]
-		print(f'Accuracy for class: {classname:5s} is {accuracy:.1f} %')
+def plot_losses(history):
+	"""Plot the losses in each epoch"""
+	plt.clf()
+	train_losses = [x.get("train_loss") for x in history]
+	val_losses = [x["val_loss"] for x in history]
+	plt.plot(train_losses, "-bx")
+	plt.plot(val_losses, "-rx")
+	plt.xlabel("epoch")
+	plt.ylabel("loss")
+	plt.legend(["Training", "Validation"])
+	plt.title("Loss vs. No. of epochs")
+	plt.savefig("loss-graph-resnet18.png")
 
 if __name__ == "__main__":
-	if sys.argv[1] == 'train':
-		train()
-	elif sys.argv[1] == 'test':
-		test()
+	train_transform = transforms.Compose(
+		[
+			transforms.Resize((150, 150)),
+			transforms.RandomHorizontalFlip(0.1),
+			# transforms.RandomSolarize(.1),
+			# transforms.RandomEqualize(.1),
+			# transforms.RandomGrayscale(.1),
+			transforms.ToTensor(),
+		]
+	)
+	# load the train and test data
+	train_dataset = datasets.ImageFolder(data_dir, transform=train_transform)
+
+	val_data = datasets.ImageFolder(
+		test_data_dir,
+		transforms.Compose([transforms.Resize((150, 150)), transforms.ToTensor()]),
+	)
+
+	batch_size = 128
+
+	train_loader = DataLoader(
+		train_dataset,
+		batch_size,
+		shuffle=True,
+		num_workers=4,
+		pin_memory=True,
+	)
+	val_loader = DataLoader(
+		val_data,
+		batch_size * 2,
+		num_workers=4,
+		pin_memory=True,
+	)
+
+	# to device for gpu
+	net = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+	num_ftrs = net.fc.in_features
+	net.fc = nn.Linear(num_ftrs, num_classes)
+
+	num_epochs = 30
+	lr = 0.001
+	# fitting the model on training data and record the result after each epoch
+	history = fit(num_epochs, lr, net, train_loader, val_loader)
+	plot_accuracies(history)
+	plot_losses(history)

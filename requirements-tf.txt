@@ -1,0 +1,7 @@
+matplotlib
+seaborn
+keras 
+sklearn
+opencv-python
+tensorflow-macos 
+numpy
